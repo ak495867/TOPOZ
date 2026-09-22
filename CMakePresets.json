@@ -1,0 +1,45 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release with live providers",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "TOPOΣ_BUILD_TESTS": "ON",
+        "TOPOΣ_ENABLE_CURL": "ON"
+      }
+    },
+    {
+      "name": "no-curl",
+      "displayName": "Portable simulation-only build",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build/no-curl",
+      "cacheVariables": { "TOPOΣ_ENABLE_CURL": "OFF" }
+    },
+    {
+      "name": "sanitize",
+      "displayName": "Address and undefined behavior sanitizers",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build/sanitize",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "no-curl", "configurePreset": "no-curl" },
+    { "name": "sanitize", "configurePreset": "sanitize" }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "no-curl", "configurePreset": "no-curl", "output": { "outputOnFailure": true } },
+    { "name": "sanitize", "configurePreset": "sanitize", "output": { "outputOnFailure": true } }
+  ]
+}

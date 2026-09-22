@@ -13,6 +13,7 @@ class Dashboard {
 public:
     explicit Dashboard(MarketDataConfig config);
     int run(std::size_t maximum_updates = 0);
+    static void request_stop();
 private:
     std::string render_header(const AnalysisResult& result) const;
     std::string render_manifold(const AnalysisResult& result) const;
@@ -23,6 +24,7 @@ private:
     std::string render_rg(const AnalysisResult& result) const;
     std::string render_footer(const AnalysisResult& result) const;
     std::string panel(const std::string& title, const std::string& content, const std::string& color) const;
+    void emit_structured(const AnalysisResult& result) const;
     void clear_screen() const;
     MarketDataConfig config_;
     MarketDataManager data_manager_;

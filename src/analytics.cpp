@@ -275,6 +275,7 @@ ToposEngine::ToposEngine(std::size_t embedding_dimension, std::size_t history_si
 void ToposEngine::seed(const std::vector<double>& prices, const std::vector<double>& volumes, const std::vector<double>& timestamps) {
     const std::size_t count = std::min(prices.size(), volumes.size());
     for (std::size_t i = count > history_size_ ? count - history_size_ : 0; i < count; ++i) {
+        if (!std::isfinite(prices[i]) || prices[i] <= 0.0 || !std::isfinite(volumes[i]) || volumes[i] < 0.0) continue;
         prices_.push_back(prices[i]);
         volumes_.push_back(volumes[i]);
         timestamps_.push_back(i < timestamps.size() ? timestamps[i] : now_seconds());
@@ -411,6 +412,7 @@ AnalysisResult ToposEngine::empty_result(double timestamp, double price, double 
 }
 
 AnalysisResult ToposEngine::update(double price, double volume, double timestamp) {
+    if (!std::isfinite(price) || price <= 0.0 || !std::isfinite(volume) || volume < 0.0 || !std::isfinite(timestamp)) return empty_result(timestamp, price, volume);
     prices_.push_back(price);
     volumes_.push_back(volume);
     timestamps_.push_back(timestamp);

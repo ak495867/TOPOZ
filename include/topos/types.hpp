@@ -23,6 +23,9 @@ struct MarketDataConfig {
     AssetType asset_type = AssetType::Crypto;
     DataSource data_source = DataSource::Simulation;
     double update_interval = 0.5;
+    double request_timeout = 12.0;
+    std::size_t max_consecutive_errors = 3;
+    std::string output_mode = "dashboard";
     std::string api_key;
     bool use_websocket = false;
     bool fallback_to_simulation = true;

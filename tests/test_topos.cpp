@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -47,6 +48,21 @@ int main() {
     require(manager.simulation_mode(), "manager simulation mode");
     require(manager.prices().size() >= 50, "manager seeds history");
     require(manager.current().has_value(), "manager current tick");
+
+    topos::ToposEngine bounded_engine(5, 10);
+    std::vector<double> long_prices(25, 100.0);
+    std::vector<double> long_volumes(25, 10.0);
+    bounded_engine.seed(long_prices, long_volumes);
+    require(bounded_engine.size() == 10, "engine honors configured history size");
+    const auto invalid = bounded_engine.update(std::numeric_limits<double>::quiet_NaN(), 10.0, 1.0);
+    require(bounded_engine.size() == 10, "invalid update does not mutate history");
+    require(!std::isfinite(invalid.price) || invalid.price == 0.0, "invalid update returns empty result");
+
+    topos::ToposEngine constant_engine;
+    constant_engine.seed(std::vector<double>(100, 100.0), std::vector<double>(100, 1.0));
+    const auto constant = constant_engine.update(100.0, 1.0, 1.0);
+    require(std::isfinite(constant.prediction.confidence), "constant series confidence is finite");
+    require(std::isfinite(constant.manifold.raw_curvature), "constant series curvature is finite");
 
     if (failures == 0) std::cout << "All TOPOΣ tests passed\n";
     return failures == 0 ? 0 : 1;

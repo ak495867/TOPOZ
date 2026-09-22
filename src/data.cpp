@@ -7,12 +7,34 @@
 #include <cstdlib>
 #include <regex>
 #include <sstream>
+#include <nlohmann/json.hpp>
 
 #ifdef TOPOS_WITH_CURL
 #include <curl/curl.h>
 #endif
 
 namespace topos {
+
+using Json = nlohmann::json;
+
+namespace {
+std::optional<double> json_number(const Json& value) {
+    try {
+        if (value.is_number()) return value.get<double>();
+        if (value.is_string()) return std::stod(value.get<std::string>());
+    } catch (...) {}
+    return std::nullopt;
+}
+
+std::optional<double> json_field_number(const Json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key) || object.at(key).is_null()) return std::nullopt;
+    return json_number(object.at(key));
+}
+
+bool valid_tick(const MarketTick& tick) {
+    return std::isfinite(tick.price) && tick.price > 0.0 && std::isfinite(tick.volume) && tick.volume >= 0.0 && std::isfinite(tick.timestamp);
+}
+}
 
 DataFeedProvider::DataFeedProvider(MarketDataConfig config) : config_(std::move(config)) {}
 
@@ -116,7 +138,7 @@ std::optional<std::string> CurlProviderBase::get(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 12L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(std::max(1.0, config_.request_timeout) * 1000.0));
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Topos/1.0");
     const CURLcode code = curl_easy_perform(curl);
     long status = 0;
@@ -130,8 +152,17 @@ std::optional<std::string> CurlProviderBase::get(const std::string& url) {
         last_error_ = "HTTP status " + std::to_string(status);
         return std::nullopt;
     }
+    if (body.size() > 4 * 1024 * 1024) {
+        last_error_ = "provider response exceeded 4 MiB limit";
+        return std::nullopt;
+    }
+    if (body.find("API call frequency") != std::string::npos || body.find("rate limit") != std::string::npos || body.find("Rate limit") != std::string::npos) {
+        last_error_ = "provider rate limit response";
+        return std::nullopt;
+    }
     return body;
 #else
+    (void)url;
     last_error_ = "This build does not include libcurl";
     return std::nullopt;
 #endif
@@ -192,24 +223,41 @@ void YahooFinanceProvider::disconnect() { connected_ = false; }
 std::optional<MarketTick> YahooFinanceProvider::current() {
     const auto body = chart_body();
     if (!body) return std::nullopt;
-    const auto prices = numbers_after_key(*body, "\"close\"");
-    const auto volumes = numbers_after_key(*body, "\"volume\"");
-    if (prices.empty()) return std::nullopt;
-    const double volume = volumes.empty() ? 0.0 : volumes.back();
-    return MarketTick{prices.back(), volume, now_seconds(), prices.back(), prices.back(), prices.back()};
+    try {
+        const auto chart = Json::parse(*body).at("chart").at("result").at(0);
+        const auto& quote = chart.at("indicators").at("quote").at(0);
+        const auto& closes = quote.at("close");
+        for (std::size_t i = closes.size(); i-- > 0;) {
+            const auto close = json_number(closes.at(i));
+            if (!close || !std::isfinite(*close) || *close <= 0.0) continue;
+            const auto volume = i < quote.at("volume").size() ? json_number(quote.at("volume").at(i)) : std::optional<double>{};
+            return MarketTick{*close, std::max(0.0, volume.value_or(0.0)), now_seconds(), close.value_or(0.0), close.value_or(0.0), close.value_or(0.0)};
+        }
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Yahoo response: ") + error.what(); }
+    return std::nullopt;
 }
 
 std::vector<MarketTick> YahooFinanceProvider::historical(std::size_t limit) {
     const auto body = chart_body();
     if (!body) return {};
-    const auto prices = numbers_after_key(*body, "\"close\"");
-    const auto volumes = numbers_after_key(*body, "\"volume\"");
     std::vector<MarketTick> result;
-    const std::size_t start = prices.size() > limit ? prices.size() - limit : 0;
-    for (std::size_t i = start; i < prices.size(); ++i) {
-        const double volume = i < volumes.size() ? volumes[i] : 0.0;
-        result.push_back(MarketTick{prices[i], volume, now_seconds() - static_cast<double>(prices.size() - i) * 60.0, prices[i], prices[i], prices[i]});
-    }
+    try {
+        const auto chart = Json::parse(*body).at("chart").at("result").at(0);
+        const auto& timestamps = chart.at("timestamp");
+        const auto& quote = chart.at("indicators").at("quote").at(0);
+        const auto& closes = quote.at("close");
+        const std::size_t start = closes.size() > limit ? closes.size() - limit : 0;
+        for (std::size_t i = start; i < closes.size(); ++i) {
+            const auto open = json_number(quote.at("open").at(i));
+            const auto high = json_number(quote.at("high").at(i));
+            const auto low = json_number(quote.at("low").at(i));
+            const auto close = json_number(closes.at(i));
+            if (!close || !open || !high || !low || !std::isfinite(*close) || *close <= 0.0) continue;
+            const auto volume = i < quote.at("volume").size() ? json_number(quote.at("volume").at(i)) : std::optional<double>{};
+            const double timestamp = i < timestamps.size() && timestamps.at(i).is_number() ? timestamps.at(i).get<double>() : now_seconds();
+            result.push_back(MarketTick{*close, std::max(0.0, volume.value_or(0.0)), timestamp, *high, *low, *open});
+        }
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Yahoo response: ") + error.what(); }
     return result;
 }
 
@@ -244,19 +292,32 @@ void CoinGeckoProvider::disconnect() { connected_ = false; }
 std::optional<MarketTick> CoinGeckoProvider::current() {
     const auto body = get("https://api.coingecko.com/api/v3/simple/price?ids=" + url_encode(coin_id()) + "&vs_currencies=" + url_encode(currency()) + "&include_24hr_vol=true");
     if (!body) return std::nullopt;
-    const auto price = number_after_key(*body, "\"" + currency() + "\"");
-    if (!price) return std::nullopt;
-    const auto volume = number_after_key(*body, "\"" + currency() + "_24h_vol\"");
-    return MarketTick{*price, volume.value_or(0.0), now_seconds(), *price, *price, *price};
+    try {
+        const auto object = Json::parse(*body).at(coin_id());
+        const auto price = json_field_number(object, currency().c_str());
+        if (!price || !std::isfinite(*price) || *price <= 0.0) return std::nullopt;
+        const auto volume = json_field_number(object, (currency() + "_24h_vol").c_str());
+        return MarketTick{*price, std::max(0.0, volume.value_or(0.0)), now_seconds(), *price, *price, *price};
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid CoinGecko response: ") + error.what(); }
+    return std::nullopt;
 }
 
 std::vector<MarketTick> CoinGeckoProvider::historical(std::size_t limit) {
     const auto body = get("https://api.coingecko.com/api/v3/coins/" + url_encode(coin_id()) + "/market_chart?vs_currency=" + url_encode(currency()) + "&days=1");
     if (!body) return {};
-    const auto prices = numbers_after_key(*body, "\"prices\"");
     std::vector<MarketTick> result;
-    for (std::size_t i = 1; i < prices.size(); i += 2) result.push_back(MarketTick{prices[i], 0.0, now_seconds() - static_cast<double>(prices.size() - i) * 60.0, prices[i], prices[i], prices[i]});
-    if (result.size() > limit) result.erase(result.begin(), result.end() - static_cast<std::ptrdiff_t>(limit));
+    try {
+        const auto prices = Json::parse(*body).at("prices");
+        const std::size_t start = prices.size() > limit ? prices.size() - limit : 0;
+        for (std::size_t i = start; i < prices.size(); ++i) {
+            if (!prices.at(i).is_array() || prices.at(i).size() < 2) continue;
+            const auto timestamp = json_number(prices.at(i).at(0));
+            const auto price = json_number(prices.at(i).at(1));
+            if (!timestamp || !price || !std::isfinite(*price) || *price <= 0.0) continue;
+            const double seconds = *timestamp / 1000.0;
+            result.push_back(MarketTick{*price, 0.0, seconds, *price, *price, *price});
+        }
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid CoinGecko response: ") + error.what(); }
     return result;
 }
 
@@ -273,20 +334,36 @@ void AlphaVantageProvider::disconnect() { connected_ = false; }
 std::optional<MarketTick> AlphaVantageProvider::current() {
     const auto body = get("https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" + url_encode(config_.symbol) + "&apikey=" + url_encode(config_.api_key));
     if (!body) return std::nullopt;
-    const auto price = number_after_key(*body, "\"05. price\"");
-    const auto volume = number_after_key(*body, "\"06. volume\"");
-    if (!price) return std::nullopt;
-    return MarketTick{*price, volume.value_or(0.0), now_seconds(), *price, *price, *price};
+    try {
+        const auto quote = Json::parse(*body).at("Global Quote");
+        const auto price = json_field_number(quote, "05. price");
+        if (!price || !std::isfinite(*price) || *price <= 0.0) return std::nullopt;
+        const auto volume = json_field_number(quote, "06. volume");
+        return MarketTick{*price, std::max(0.0, volume.value_or(0.0)), now_seconds(), *price, *price, *price};
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Alpha Vantage response: ") + error.what(); }
+    return std::nullopt;
 }
 
 std::vector<MarketTick> AlphaVantageProvider::historical(std::size_t limit) {
     const auto body = get("https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=" + url_encode(config_.symbol) + "&interval=5min&outputsize=full&apikey=" + url_encode(config_.api_key));
     if (!body) return {};
-    const auto prices = numbers_after_key(*body, "\"4. close\"");
-    const auto volumes = numbers_after_key(*body, "\"5. volume\"");
     std::vector<MarketTick> result;
-    const std::size_t start = prices.size() > limit ? prices.size() - limit : 0;
-    for (std::size_t i = start; i < prices.size(); ++i) result.push_back(MarketTick{prices[i], i < volumes.size() ? volumes[i] : 0.0, now_seconds() - static_cast<double>(prices.size() - i) * 300.0, prices[i], prices[i], prices[i]});
+    try {
+        const auto series = Json::parse(*body).at("Time Series (5min)");
+        std::vector<std::pair<std::string, Json>> rows;
+        for (const auto& item : series.items()) rows.emplace_back(item.key(), item.value());
+        std::sort(rows.begin(), rows.end(), [](const auto& left, const auto& right) { return left.first < right.first; });
+        const std::size_t start = rows.size() > limit ? rows.size() - limit : 0;
+        for (std::size_t i = start; i < rows.size(); ++i) {
+            const auto open = json_field_number(rows[i].second, "1. open");
+            const auto high = json_field_number(rows[i].second, "2. high");
+            const auto low = json_field_number(rows[i].second, "3. low");
+            const auto close = json_field_number(rows[i].second, "4. close");
+            const auto volume = json_field_number(rows[i].second, "5. volume");
+            if (!open || !high || !low || !close || !std::isfinite(*close) || *close <= 0.0) continue;
+            result.push_back(MarketTick{*close, std::max(0.0, volume.value_or(0.0)), now_seconds() - static_cast<double>(rows.size() - i) * 300.0, *high, *low, *open});
+        }
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Alpha Vantage response: ") + error.what(); }
     return result;
 }
 
@@ -303,17 +380,31 @@ void TwelveDataProvider::disconnect() { connected_ = false; }
 std::optional<MarketTick> TwelveDataProvider::current() {
     const auto body = get("https://api.twelvedata.com/price?symbol=" + url_encode(config_.symbol) + "&apikey=" + url_encode(config_.api_key));
     if (!body) return std::nullopt;
-    const auto price = number_after_key(*body, "\"price\"");
-    if (!price) return std::nullopt;
-    return MarketTick{*price, 0.0, now_seconds(), *price, *price, *price};
+    try {
+        const auto price = json_field_number(Json::parse(*body), "price");
+        if (!price || !std::isfinite(*price) || *price <= 0.0) return std::nullopt;
+        return MarketTick{*price, 0.0, now_seconds(), *price, *price, *price};
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Twelve Data response: ") + error.what(); }
+    return std::nullopt;
 }
 
 std::vector<MarketTick> TwelveDataProvider::historical(std::size_t limit) {
     const auto body = get("https://api.twelvedata.com/time_series?symbol=" + url_encode(config_.symbol) + "&interval=1min&outputsize=" + std::to_string(limit) + "&apikey=" + url_encode(config_.api_key));
     if (!body) return {};
-    const auto prices = numbers_after_key(*body, "\"close\"");
     std::vector<MarketTick> result;
-    for (double price : prices) result.push_back(MarketTick{price, 0.0, now_seconds(), price, price, price});
+    try {
+        const auto values = Json::parse(*body).at("values");
+        const std::size_t start = values.size() > limit ? values.size() - limit : 0;
+        for (std::size_t i = start; i < values.size(); ++i) {
+            const auto open = json_field_number(values.at(i), "open");
+            const auto high = json_field_number(values.at(i), "high");
+            const auto low = json_field_number(values.at(i), "low");
+            const auto close = json_field_number(values.at(i), "close");
+            const auto volume = json_field_number(values.at(i), "volume");
+            if (!close || !std::isfinite(*close) || *close <= 0.0) continue;
+            result.push_back(MarketTick{*close, std::max(0.0, volume.value_or(0.0)), now_seconds() - static_cast<double>(values.size() - i) * 60.0, high.value_or(*close), low.value_or(*close), open.value_or(*close)});
+        }
+    } catch (const std::exception& error) { last_error_ = std::string("Invalid Twelve Data response: ") + error.what(); }
     return result;
 }
 
@@ -334,6 +425,7 @@ void MarketDataManager::initialize() {
         simulation_mode_ = config_.data_source == DataSource::Simulation;
         return;
     }
+    provider_error_ = provider_->last_error();
     if (!config_.fallback_to_simulation) {
         provider_status_ = "connection failed";
         return;
@@ -348,6 +440,7 @@ void MarketDataManager::initialize() {
 
 void MarketDataManager::seed(const std::vector<MarketTick>& history) {
     for (const auto& tick : history) {
+        if (!valid_tick(tick)) continue;
         prices_.push_back(tick.price);
         volumes_.push_back(tick.volume);
         timestamps_.push_back(tick.timestamp);
@@ -360,8 +453,16 @@ void MarketDataManager::seed(const std::vector<MarketTick>& history) {
 
 std::optional<MarketTick> MarketDataManager::current() {
     if (!provider_) return std::nullopt;
+    if (!provider_->connected()) {
+        provider_error_ = provider_->last_error().empty() ? "provider is not connected" : provider_->last_error();
+        return std::nullopt;
+    }
     const auto tick = provider_->current();
     if (tick) {
+        if (!valid_tick(*tick)) {
+            provider_error_ = "provider returned an invalid market tick";
+            return std::nullopt;
+        }
         prices_.push_back(tick->price);
         volumes_.push_back(tick->volume);
         timestamps_.push_back(tick->timestamp);
@@ -371,6 +472,7 @@ std::optional<MarketTick> MarketDataManager::current() {
         last_price_ = tick->price;
         return tick;
     }
+    provider_error_ = provider_->last_error();
     if (config_.fallback_to_simulation && !simulation_mode_) {
         simulation_mode_ = true;
         degraded_mode_ = true;
@@ -387,6 +489,7 @@ const std::deque<double>& MarketDataManager::volumes() const { return volumes_; 
 bool MarketDataManager::simulation_mode() const { return simulation_mode_; }
 bool MarketDataManager::degraded_mode() const { return degraded_mode_; }
 const std::string& MarketDataManager::provider_status() const { return provider_status_; }
+const std::string& MarketDataManager::provider_error() const { return provider_error_; }
 void MarketDataManager::cleanup() { if (provider_) provider_->disconnect(); }
 
 }

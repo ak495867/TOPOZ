@@ -19,7 +19,8 @@ The project is designed for research, education, prototyping, and systems experi
 | Scaling analysis | Rescaled-range Hurst estimation and multiscale flow labels. |
 | Signal synthesis | Rule-based direction, strength, confidence score, expected move score, and singularity status. |
 | Terminal dashboard | ANSI terminal interface with live metrics, status, latency, and provider state. |
-| Portable build | CMake project using C++17 and an optional libcurl integration for HTTP providers. |
+| Structured output | Dashboard, JSON, and CSV output modes for scripts and monitoring. |
+| Portable build | CMake project using C++17, nlohmann-json, and optional libcurl integration for HTTP providers. |
 
 ## Repository layout
 
@@ -53,7 +54,7 @@ The minimum build requirement is a compiler with C++17 support and CMake 3.20 or
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake libcurl4-openssl-dev
+sudo apt install -y build-essential cmake libcurl4-openssl-dev nlohmann-json3-dev
 ```
 
 ### macOS
@@ -80,13 +81,21 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTOPOΣ_ENABLE_CURL=OFF
 cmake --build build --parallel
 ```
 
+Equivalent preset builds are available:
+
+```bash
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
+```
+
 ## Test
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-The tests cover simulation connectivity, historical seeding, engine bounds, finite analytical outputs, score ranges, and manager operation.
+The tests cover simulation connectivity, historical seeding, engine bounds, invalid-input rejection, finite analytical outputs, score ranges, and manager operation. CI additionally exercises GCC, Clang, curl-enabled and no-curl builds, structured-output smoke tests, and AddressSanitizer/UndefinedBehaviorSanitizer.
 
 ## Run
 
@@ -102,7 +111,16 @@ Run continuously in simulation mode:
 ./build/topos --source simulation --symbol SIM-BTC --interval 0.5
 ```
 
+For automation, use structured output:
+
+```bash
+./build/topos --source simulation --interval 0.05 --updates 20 --output json
+./build/topos --source simulation --interval 0.05 --updates 20 --output csv
+```
+
 The terminal dashboard uses ANSI escape sequences. Run it in a terminal emulator with ANSI support for the intended display.
+
+The CLI validates finite positive intervals and bounded retry settings. Provider failures terminate cleanly when `--no-fallback` is selected; otherwise the manager falls back to simulation while retaining the original provider error. Provider responses are parsed with `nlohmann::json`, and invalid market ticks are rejected before entering the analytical engine.
 
 ## Live data providers
 
@@ -144,5 +162,3 @@ This project is distributed under the MIT License. See [LICENSE](LICENSE).
 ## Disclaimer
 
 TOPOΣ is experimental software for market-data analysis. It does not provide financial, investment, legal, tax, or trading advice. The output is not a forecast guarantee. Users are responsible for validating data quality, model behavior, risk assumptions, and regulatory obligations before using the software in any operational context.
-
-

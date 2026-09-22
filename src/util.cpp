@@ -95,6 +95,10 @@ double clamp(double value, double low, double high) {
     return std::max(low, std::min(value, high));
 }
 
+bool is_finite_positive(double value) {
+    return std::isfinite(value) && value > 0.0;
+}
+
 double mean(const std::vector<double>& values) {
     if (values.empty()) return 0.0;
     return std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());

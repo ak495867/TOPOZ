@@ -6,14 +6,54 @@ on:
 
 jobs:
   build:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }} / curl=${{ matrix.curl }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cxx: g++
+            build_type: Release
+            curl: ON
+          - compiler: clang
+            cxx: clang++
+            build_type: Debug
+            curl: ON
+          - compiler: gcc
+            cxx: g++
+            build_type: Release
+            curl: OFF
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ${{ matrix.cxx == 'clang++' && 'clang' || 'g++' }} libcurl4-openssl-dev nlohmann-json3-dev
+      - name: Configure
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DTOPOΣ_ENABLE_CURL=${{ matrix.curl }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: CLI smoke tests
+        run: |
+          ./build/topos --source simulation --interval 0.001 --updates 2 --output json
+          ./build/topos --source simulation --interval 0.001 --updates 2 --output csv
+
+  sanitizers:
+    name: AddressSanitizer and UndefinedBehaviorSanitizer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ libcurl4-openssl-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libcurl4-openssl-dev nlohmann-json3-dev
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
       - name: Build
         run: cmake --build build --parallel
       - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build --output-on-failure

@@ -12,6 +12,7 @@ namespace topos {
 
 double now_seconds();
 double clamp(double value, double low, double high);
+bool is_finite_positive(double value);
 double mean(const std::vector<double>& values);
 double standard_deviation(const std::vector<double>& values);
 double percentile(std::vector<double> values, double p);

@@ -6,9 +6,16 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <nlohmann/json.hpp>
+#include <atomic>
+#include <csignal>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace topos {
 namespace {
+std::atomic<bool> stop_requested{false};
 const std::string cyan = "\033[36m";
 const std::string green = "\033[32m";
 const std::string yellow = "\033[33m";
@@ -34,6 +41,8 @@ Dashboard::Dashboard(MarketDataConfig config)
     if (tick) current_ = engine_.update(tick->price, tick->volume, tick->timestamp);
 }
 
+void Dashboard::request_stop() { stop_requested.store(true); }
+
 std::string Dashboard::panel(const std::string& title, const std::string& content, const std::string& color) const {
     std::ostringstream output;
     output << color << "+------------------------------------------------------------+\n" << reset;
@@ -51,6 +60,7 @@ std::string Dashboard::render_header(const AnalysisResult& result) const {
     content << line(config_.symbol + "  |  $" + format_number(result.price, 2) + "  |  " + (data_manager_.simulation_mode() ? yellow + "SIMULATION" + reset : green + "LIVE" + reset));
     content << line("Regime: " + uppercase(to_string(prediction.regime)) + "  Direction: " + status_color(prediction.direction) + to_string(prediction.direction) + reset + "  Singularity: " + (singularity.active ? red : yellow) + to_string(singularity.type) + " [" + format_number(singularity.score, 2) + "]" + reset);
     content << line("Provider: " + data_manager_.provider_status());
+    if (!data_manager_.provider_error().empty()) content << line("Provider error: " + data_manager_.provider_error());
     return panel("TOPOΣ | TOPOLOGICAL ORDER PARAMETER & SINGULARITY ENGINE", content.str(), cyan);
 }
 
@@ -134,15 +144,42 @@ std::string Dashboard::render_footer(const AnalysisResult&) const {
 
 void Dashboard::clear_screen() const { std::cout << "\033[2J\033[H"; }
 
+void Dashboard::emit_structured(const AnalysisResult& result) const {
+    if (config_.output_mode == "csv") {
+        if (updates_ == 1) std::cout << "timestamp,symbol,price,volume,direction,strength,confidence,expected_move_pct,regime,provider\n";
+        std::cout << std::fixed << std::setprecision(8) << result.timestamp << ',' << config_.symbol << ',' << result.price << ',' << result.volume << ',' << to_string(result.prediction.direction) << ',' << result.prediction.strength << ',' << result.prediction.confidence << ',' << result.prediction.expected_move_pct << ',' << to_string(result.prediction.regime) << ',' << data_manager_.provider_status() << '\n';
+        return;
+    }
+    nlohmann::json output = {
+        {"timestamp", result.timestamp}, {"symbol", config_.symbol}, {"price", result.price},
+        {"volume", result.volume}, {"direction", to_string(result.prediction.direction)},
+        {"strength", result.prediction.strength}, {"confidence", result.prediction.confidence},
+        {"expected_move_pct", result.prediction.expected_move_pct},
+        {"regime", to_string(result.prediction.regime)}, {"hurst_exponent", result.prediction.hurst_exponent},
+        {"singularity_score", result.singularity.score}, {"data_source", to_string(config_.data_source)},
+        {"provider_status", data_manager_.provider_status()}, {"provider_error", data_manager_.provider_error()}, {"degraded", data_manager_.degraded_mode()}
+    };
+    std::cout << output.dump() << '\n';
+}
+
 int Dashboard::run(std::size_t maximum_updates) {
-    while (maximum_updates == 0 || updates_ < maximum_updates) {
+    std::size_t consecutive_errors = 0;
+    while (!stop_requested.load() && (maximum_updates == 0 || updates_ < maximum_updates)) {
         const auto start = std::chrono::steady_clock::now();
         const auto tick = data_manager_.current();
         if (!tick) {
             ++errors_;
+            ++consecutive_errors;
+            if (!config_.fallback_to_simulation || consecutive_errors >= config_.max_consecutive_errors) {
+                std::cerr << "Provider failed: " << (data_manager_.provider_error().empty() ? data_manager_.provider_status() : data_manager_.provider_error()) << "\n";
+                if (!config_.fallback_to_simulation) std::cerr << "Fallback disabled; terminating.\n";
+                data_manager_.cleanup();
+                return 1;
+            }
             std::this_thread::sleep_for(std::chrono::duration<double>(config_.update_interval));
             continue;
         }
+        consecutive_errors = 0;
         current_ = engine_.update(tick->price, tick->volume, tick->timestamp);
         direction_history_.push_back(current_.prediction.direction);
         if (direction_history_.size() > 20) direction_history_.erase(direction_history_.begin());
@@ -150,7 +187,14 @@ int Dashboard::run(std::size_t maximum_updates) {
         const auto end = std::chrono::steady_clock::now();
         last_latency_ = std::chrono::duration<double>(end - start).count();
         average_latency_ = average_latency_ * 0.99 + last_latency_ * 0.01;
+        if (config_.output_mode == "json" || config_.output_mode == "csv") {
+            emit_structured(current_);
+        } else {
+#ifndef _WIN32
+        if (isatty(STDOUT_FILENO)) clear_screen();
+#else
         clear_screen();
+#endif
         std::cout << render_header(current_);
         std::cout << render_manifold(current_);
         std::cout << render_topology(current_);
@@ -159,9 +203,11 @@ int Dashboard::run(std::size_t maximum_updates) {
         std::cout << render_singularity(current_);
         std::cout << render_rg(current_);
         std::cout << render_footer(current_) << std::flush;
+        }
         std::this_thread::sleep_for(std::chrono::duration<double>(config_.update_interval));
     }
     data_manager_.cleanup();
+    if (stop_requested.load()) std::cerr << "Shutdown requested.\n";
     return errors_ == 0 ? 0 : 1;
 }
 

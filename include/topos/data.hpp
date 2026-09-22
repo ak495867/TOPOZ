@@ -107,6 +107,7 @@ public:
     bool simulation_mode() const;
     bool degraded_mode() const;
     const std::string& provider_status() const;
+    const std::string& provider_error() const;
     void cleanup();
 private:
     void initialize();
@@ -119,6 +120,7 @@ private:
     bool simulation_mode_ = false;
     bool degraded_mode_ = false;
     std::string provider_status_ = "not initialized";
+    std::string provider_error_;
     double last_price_ = 50000.0;
 };
 
